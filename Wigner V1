@@ -1,0 +1,75 @@
+# two_pixel_wigner_bloch.py
+# SU(2) Wigner function on the Bloch sphere for the post-measurement state.
+# Uses QuTiP's spin_wigner on the symmetric spin-j representation.
+
+import numpy as np, math, matplotlib.pyplot as plt
+from qutip import Qobj, expect, spin_wigner, jmat
+
+# ----------- parameters -----------
+N = 30
+p0, p1, p2 = 0.5, 0.25, 0.25
+sigma = 0.5
+chi = 1.0/(2.0*sigma**2)
+h1, h2 = int(round(N*p1)), int(round(N*p2))
+
+# ----------- build the same post-measurement state in number basis -----------
+states = [(n1, n2) for n1 in range(N+1) for n2 in range(N+1-n1)]
+dim = len(states)
+n1_diag = np.array([n1 for (n1, n2) in states], float)
+n2_diag = np.array([n2 for (n1, n2) in states], float)
+n0_diag = N - n1_diag - n2_diag
+
+lg = np.array([math.lgamma(k+1) for k in range(N+1)])
+amps = np.zeros(dim, float)
+for i,(n1v,n2v) in enumerate(states):
+    n0v = N - n1v - n2v
+    log_mult = lg[N] - (lg[n0v] + lg[n1v] + lg[n2v])
+    amps[i] = math.exp(0.5*log_mult) * (p0**(n0v/2)) * (p1**(n1v/2)) * (p2**(n2v/2))
+amps /= np.linalg.norm(amps)
+psi0 = Qobj(amps)
+
+diag = np.exp(-0.5*chi*((n1_diag - h1)**2 + (n2_diag - h2)**2))
+M = Qobj(np.diag(diag))
+psi_post = (M*psi0).unit()
+
+# ----------- map to collective spin-j state -----------
+# In this model Sz = 1/2 (n0 - n1 - n2) with j = N/2, so the amplitudes correspond to m = Sz eigenvalues.
+# We collapse (n1,n2) that have same m into the |j,m> basis coherently (same relative phase from psi_post).
+j = N/2
+m_vals = (n0_diag - n1_diag - n2_diag)/2.0
+m_unique = np.arange(-j, j+1, 1)
+# collect amplitudes for each m by summing contributions with the SAME m (they are already in Sz eigenbasis)
+psi_m = np.zeros(int(2*j+1), dtype=complex)
+for amp, m in zip(psi_post.full().ravel(), m_vals):
+    idx = int(m + j)  # map m -> 0..2j
+    psi_m[idx] += amp
+# normalize after coherent sum
+psi_m /= np.linalg.norm(psi_m)
+psi_spin = Qobj(psi_m)  # state in |j,m> basis (dimension 2j+1)
+
+# ----------- Wigner on the sphere -----------
+theta = np.linspace(0, np.pi, 181)
+phi   = np.linspace(0, 2*np.pi, 361)
+W, _, _ = spin_wigner(psi_spin, theta, phi)  # shape (len(theta), len(phi))
+
+# ----------- plot -----------
+plt.figure(figsize=(8,4))
+plt.subplot(1,2,1)
+plt.imshow(W, extent=[0, 360, 0, 180], origin='lower', aspect='auto', cmap='RdBu_r')
+plt.colorbar(label='Spin Wigner W(θ,φ)')
+plt.xlabel('φ (deg)'); plt.ylabel('θ (deg)')
+plt.title('Spin-Wigner (heatmap)')
+
+# optional: show mean spin direction for reference
+Jx, Jy, Jz = jmat(j, 'x'), jmat(j, 'y'), jmat(j, 'z')
+mx = expect(Jx, psi_spin); my = expect(Jy, psi_spin); mz = expect(Jz, psi_spin)
+m = np.array([mx, my, mz], float); m /= (j+1e-12)
+theta_m = np.degrees(np.arccos(np.clip(m[2], -1, 1))); phi_m = np.degrees(np.arctan2(m[1], m[0]))
+plt.scatter([phi_m], [theta_m], s=60, edgecolors='k', facecolors='w')
+
+plt.subplot(1,2,2), plt.plot()
+plt.axis('off'); plt.text(0.02, 0.95,
+    f'N={N}\nσ={sigma}\nrecord (h₁,h₂)=({h1},{h2})\n|⟨J⟩|/j ≈ {np.linalg.norm(m):.3f}',
+    transform=plt.gca().transAxes, fontsize=11, va='top')
+plt.title('Params / ⟨J⟩ marker')
+plt.tight_layout(); plt.show()
