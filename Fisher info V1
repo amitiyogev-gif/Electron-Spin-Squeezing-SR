@@ -1,0 +1,66 @@
+# two_pixel_fisher_heatmap.py
+# Triangular (simplex) heatmap of conditional QFI F(h1,h2) = 4 Var(Sz) for each measurement record (h1,h2).
+
+import numpy as np, math, matplotlib.pyplot as plt
+from qutip import Qobj, expect
+
+# ----------- parameters -----------
+N = 30
+p0, p1, p2 = 0.5, 0.25, 0.25
+sigma = 0.5
+chi = 1.0/(2.0*sigma**2)
+
+# ----------- basis and operators -----------
+states = [(n1, n2) for n1 in range(N+1) for n2 in range(N+1-n1)]
+dim = len(states)
+n1_diag = np.array([n1 for (n1, n2) in states], float)
+n2_diag = np.array([n2 for (n1, n2) in states], float)
+n0_diag = N - n1_diag - n2_diag
+n1_op = Qobj(np.diag(n1_diag)); n2_op = Qobj(np.diag(n2_diag)); n0_op = Qobj(np.diag(n0_diag))
+Sz = 0.5*(n0_op - n1_op - n2_op)
+
+# multinomial input |psi0>
+lg = np.array([math.lgamma(k+1) for k in range(N+1)])
+amps = np.zeros(dim, float)
+for i,(n1v,n2v) in enumerate(states):
+    n0v = N - n1v - n2v
+    log_mult = lg[N] - (lg[n0v] + lg[n1v] + lg[n2v])
+    amps[i] = math.exp(0.5*log_mult) * (p0**(n0v/2)) * (p1**(n1v/2)) * (p2**(n2v/2))
+amps /= np.linalg.norm(amps)
+psi0 = Qobj(amps)
+
+def fisher(h1, h2):
+    """QFI of the conditioned state for measurement record (h1,h2): F = 4 Var(Sz)."""
+    diag = np.exp(-0.5*chi*((n1_diag - h1)**2 + (n2_diag - h2)**2))
+    M = Qobj(np.diag(diag))
+    ph = (M*psi0).unit()
+    mu = expect(Sz, ph); mu2 = expect(Sz*Sz, ph)
+    return float(4.0*(mu2 - mu**2))
+
+# compute F on all allowed outcomes (triangular domain)
+H1, H2, F = [], [], []
+for h1 in range(N+1):
+    for h2 in range(N+1-h1):
+        H1.append(h1); H2.append(h2); F.append(fisher(h1, h2))
+H1, H2, F = np.array(H1), np.array(H2), np.array(F)
+
+# ----------- plot: triangular heatmap -----------
+# draw as colored squares centered on integer lattice points inside the triangle
+plt.figure(figsize=(7,6.5))
+size = 1.0  # square side in lattice units
+half = size/2.0
+for x, y, val in zip(H1, H2, F):
+    # corners of the square cell
+    X = [x-half, x+half, x+half, x-half, x-half]
+    Y = [y-half, y-half, y+half, y+half, y-half]
+    plt.fill(X, Y, facecolor=plt.cm.viridis((val - F.min())/(F.max()-F.min()+1e-12)), edgecolor='k', linewidth=0.1)
+
+# triangle boundary
+plt.plot([0, N, 0, 0], [0, 0, N, 0], 'k-', lw=1.2)
+mappable = plt.cm.ScalarMappable(cmap='viridis'); mappable.set_array(F)
+cbar = plt.colorbar(mappable, ax=plt.gca()); cbar.set_label('Quantum Fisher information  F(h₁,h₂)')
+
+plt.title('Two-pixel Fisher-information heatmap (measurement-based)')
+plt.xlabel('h₁ (≈ probability in arm 1 × N)'); plt.ylabel('h₂ (≈ probability in arm 2 × N)')
+plt.xlim(-0.5, N+0.5); plt.ylim(-0.5, N+0.5); plt.gca().set_aspect('equal', adjustable='box')
+plt.tight_layout(); plt.show()
