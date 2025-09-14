@@ -1,0 +1,118 @@
+"""
+two_pixel_weighted_fisher.py
+Triangular heatmap of weighted Fisher information:
+  W(h1,h2) = P(h1,h2) * F(h1,h2),
+where P is the probability of getting measurement record (h1,h2)
+and F = 4 Var(Sz) of the post-measurement pure state conditioned on (h1,h2).
+"""
+
+# Install dependencies (only needed in Colab or first-time use)
+!pip install qutip
+
+import numpy as np, math
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import Normalize
+import qutip as qt
+
+# -------- Parameters (tune these) ----------
+N = 30               # total electrons (reduce for fast runs)
+j = N/2.0
+p0, p1, p2 = 0.5, 0.25, 0.25
+sigma = 0.5
+chi = 1.0/(2.0*sigma**2)
+
+# -------- Build fixed-N basis (n1,n2) with n0=N-n1-n2 -------------
+states = [(n1, n2) for n1 in range(N+1) for n2 in range(N+1-n1)]
+dim = len(states)
+n1_diag = np.array([s[0] for s in states], float)
+n2_diag = np.array([s[1] for s in states], float)
+n0_diag = N - n1_diag - n2_diag
+
+# -------- Input multinomial (coherent-like) amplitudes --------
+log_fact = np.array([math.lgamma(k+1) for k in range(N+1)])
+amps = np.zeros(dim, dtype=complex)
+for i,(n1v,n2v) in enumerate(states):
+    n0v = int(N - n1v - n2v)
+    log_mult = log_fact[N] - (log_fact[n0v] + log_fact[n1v] + log_fact[n2v])
+    amps[i] = math.exp(0.5*log_mult) * (p0**(n0v/2.0))*(p1**(n1v/2.0))*(p2**(n2v/2.0))
+amps /= np.linalg.norm(amps)
+psi0 = qt.Qobj(amps)
+
+# -------- Operators in number basis, and Sz in spin basis for QFI eval ----
+# We'll compute Sz in the spin (|j,m>) basis after mapping; but for conditioning we operate diagonal in number basis
+
+# helper: compute conditioned state for record (h1,h2)
+def conditioned_state_for_record(h1, h2):
+    diagM = np.exp(-0.5*chi*((n1_diag - h1)**2 + (n2_diag - h2)**2))
+    M = qt.Qobj(np.diag(diagM))
+    # probability of obtaining record (h1,h2) is <psi0| M^2 |psi0> (because M is diagonal positive)
+    prob_qobj = psi0.dag() * (M.dag()*M) * psi0
+    if not isinstance(prob_qobj, qt.Qobj):
+      prob_qobj = qt.Qobj([[prob_qobj]]) # Ensure it's a Qobj
+
+    prob = float(prob_qobj[0,0])
+
+    if prob <= 1e-16:
+        return prob, None
+    psi_post = (M * psi0).unit()
+    # map to spin |j,m> basis (coherently sum amplitudes with same m)
+    m_vals = ( (N - n1_diag - n2_diag) - n1_diag - n2_diag )/2.0  # careful: but simpler below
+    # actually m = (n0 - n1 - n2)/2, and n0 = N - n1 - n2
+    m_vals = (n0_diag - n1_diag - n2_diag)/2.0
+    dim_spin = int(2*j + 1)
+    psi_m = np.zeros(dim_spin, dtype=complex)
+    for amp, m in zip(np.array(psi_post.full()).ravel(), m_vals):
+        idx = int(round(m + j))
+        if idx < 0: idx = 0
+        if idx >= dim_spin: idx = dim_spin-1
+        psi_m[idx] += amp
+    # normalize spin state
+    if np.linalg.norm(psi_m) < 1e-12:
+        return prob, None
+    psi_m /= np.linalg.norm(psi_m)
+    psi_spin = qt.Qobj(psi_m)
+    return prob, psi_spin
+
+# precompute P(h1,h2) and F(h1,h2)
+H1_list, H2_list, P_list, F_list = [], [], [], []
+Sz_cache = None
+for h1 in range(N+1):
+    for h2 in range(N+1-h1):
+        P, psi_spin = conditioned_state_for_record(h1, h2)
+        H1_list.append(h1); H2_list.append(h2); P_list.append(P)
+        if psi_spin is None:
+            F_list.append(0.0)
+        else:
+            # QFI for a pure state under generator Sz (article's F=4 Var(Sz))
+            Sz = qt.jmat(j, 'z')
+            mu = float(qt.expect(Sz, psi_spin))
+            mu2 = float(qt.expect(Sz*Sz, psi_spin))
+            F_val = 4.0 * max(0.0, (mu2 - mu*mu))
+            F_list.append(F_val)
+
+H1 = np.array(H1_list); H2 = np.array(H2_list); P = np.array(P_list); F = np.array(F_list)
+weighted = P * F   # this is what your mentor described: multiply prob * fisher
+
+# ----------- Plot triangular heatmap of weighted Fisher -----------
+fig, ax = plt.subplots(figsize=(7,6))
+# Draw little square cells centered at integer lattice points within triangle
+vmin, vmax = weighted.min(), weighted.max()
+for x,y,val in zip(H1,H2,weighted):
+    # draw small square
+    s = 0.9
+    xs = [x-0.5*s, x+0.5*s, x+0.5*s, x-0.5*s]
+    ys = [y-0.5*s, y-0.5*s, y+0.5*s, y+0.5*s]
+    ax.fill(xs, ys, facecolor=cm.viridis((val-vmin)/(vmax-vmin+1e-12)), edgecolor='k', linewidth=0.2)
+
+# triangle boundary
+ax.plot([0,N,N,0],[0,0,N,0],'k-', lw=1.2)
+cbar = fig.colorbar(cm.ScalarMappable(cmap='viridis', norm=Normalize(vmin=vmin, vmax=vmax)), ax=ax)
+cbar.set_label('P(h1,h2) * F(h1,h2)')
+ax.set_xlabel('h1 (pixel 1 count)')
+ax.set_ylabel('h2 (pixel 2 count)')
+ax.set_title(f'Weighted Fisher (N={N}, sigma={sigma})')
+ax.set_aspect('equal')
+ax.set_xlim(-0.5, N+0.5); ax.set_ylim(-0.5, N+0.5)
+plt.tight_layout()
+plt.show()
