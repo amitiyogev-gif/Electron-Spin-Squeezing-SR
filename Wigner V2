@@ -1,0 +1,312 @@
+# safe_two_pixel_wigner_on_sphere.py
+# Robust plotting of the spin Wigner on a 3D Bloch sphere for a two-pixel,
+# measurement-conditioned state. Defensive about indexing to avoid "index out of bounds".
+
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import Normalize
+import qutip as qt
+from mpl_toolkits.mplot3d import Axes3D # Import Axes3D
+
+# ------------- User parameters (tune these) -------------
+N = 30               # total electrons (choose 10..40 for quick runs)
+j = N / 2.0
+p0, p1, p2 = 0.5, 0.25, 0.25
+sigma = 0.5          # measurement width (smaller --> stronger measurement)
+chi = 1.0 / (2.0 * sigma**2)
+
+# choose a measurement record to condition upon (integer counts)
+h1 = int(round(N * p1))
+h2 = int(round(N * p2))
+
+# sampling resolution for the Wigner grid (moderate defaults)
+theta_pts = 101
+phi_pts   = 201
+
+# ------------- Build fixed-N three-mode number basis -------------
+# basis: (n1, n2) where n0 = N - n1 - n2
+states = [(n1, n2) for n1 in range(N+1) for n2 in range(N+1-n1)]
+dim = len(states)
+n1_diag = np.array([s[0] for s in states], dtype=float)
+n2_diag = np.array([s[1] for s in states], dtype=float)
+n0_diag = N - n1_diag - n2_diag
+
+# ------------- Multinomial coherent input amplitudes |psi0> -------------
+log_fact = np.array([math.lgamma(k+1) for k in range(N+1)])  # log factorials
+amps = np.zeros(dim, dtype=complex)
+for i, (n1v, n2v) in enumerate(states):
+    n0v = int(N - n1v - n2v)
+    log_mult = log_fact[N] - (log_fact[n0v] + log_fact[n1v] + log_fact[n2v])
+    amps[i] = math.exp(0.5 * log_mult) * (p0 ** (n0v / 2.0)) * (p1 ** (n1v / 2.0)) * (p2 ** (n2v / 2.0))
+amps /= np.linalg.norm(amps)
+psi0 = qt.Qobj(amps)   # column vector in the number basis
+
+# ------------- Apply two-pixel Gaussian weak measurement (Kraus) -------------
+diagM = np.exp(-0.5 * chi * ((n1_diag - h1) ** 2 + (n2_diag - h2) ** 2))
+M = qt.Qobj(np.diag(diagM))
+psi_post = (M * psi0).unit()   # normalized post-measurement ket (number basis)
+
+# ------------- Map from number basis to collective spin |j,m> basis -------------
+# m = (n0 - n1 - n2)/2  with m in [-j, -j+1, ..., j]
+m_vals = (n0_diag - n1_diag - n2_diag) / 2.0
+dim_spin = int(2 * j + 1)
+psi_m = np.zeros(dim_spin, dtype=complex)
+
+# Use rounding and safe clamping to avoid out-of-bounds indexing
+for amp, m in zip(np.array(psi_post.full()).ravel(), m_vals):
+    idx = int(round(m + j))               # round to nearest integer index
+    # clamp index just in case of tiny floating error:
+    if idx < 0: idx = 0
+    if idx >= dim_spin: idx = dim_spin - 1
+    psi_m[idx] += amp
+
+# Normalize in the spin-m basis (should already be nearly normalized)
+norm_psi_m = np.linalg.norm(psi_m)
+if norm_psi_m < 1e-12:
+    raise RuntimeError("Spin mapping produced near-zero amplitudes. Check N and mapping.")
+psi_m /= norm_psi_m
+psi_spin = qt.Qobj(psi_m)   # state in |j,m> basis
+
+# ------------- Compute spin Wigner function -------------
+theta = np.linspace(0.0, np.pi, theta_pts)
+phi   = np.linspace(0.0, 2.0 * np.pi, phi_pts)
+
+# QuTiP returns W shape (len(phi), len(theta))
+W_data, _, _ = qt.spin_wigner(psi_spin, theta, phi)   # shape (phi_pts, theta_pts)
+
+# ------------- Convert to Cartesian coordinates for sphere plotting -------------
+# Use meshgrid with (theta index first) so shapes match W exactly
+THETA, PHI = np.meshgrid(theta, phi, indexing='ij')   # shape (theta_pts, phi_pts)
+X = np.sin(THETA) * np.cos(PHI)
+Y = np.sin(THETA) * np.sin(PHI)
+Z = np.cos(THETA)
+
+# Transpose W_data to match the (theta_pts, phi_pts) shape of the grid
+W_data_transposed = W_data.T
+
+# sanity checks (defensive)
+if W_data_transposed.shape != THETA.shape:
+    raise RuntimeError(f"Shape mismatch: W shape {W_data_transposed.shape} vs grid {THETA.shape}")
+
+# ------------- Color mapping and plotting -------------
+cmap = cm.seismic
+norm = Normalize(vmin=float(np.min(W_data_transposed)), vmax=float(np.max(W_data_transposed)))
+facecolors = cmap(norm(W_data_transposed))   # RGBA array same shape as W with one extra dimension
+
+# 3D surface plot
+fig = plt.figure(figsize=(9,8))
+ax = fig.add_subplot(111, projection='3d')
+
+# Plot surface (facecolors must match X,Y,Z shape)
+ax.plot_surface(X, Y, Z, rstride=1, cstride=1, facecolors=facecolors,
+                linewidth=0, antialiased=False, shade=False)
+
+#----------------- - Force visible mean-spin marker + arrow ------------------
+# compute mean-spin (true expectation, may be small)
+Jx, Jy, Jz = qt.jmat(j, 'x'), qt.jmat(j, 'y'), qt.jmat(j, 'z')
+mx = float(qt.expect(Jx, psi_spin)) / j
+my = float(qt.expect(Jy, psi_spin)) / j
+mz = float(qt.expect(Jz, psi_spin)) / j
+
+# print the raw values so you can check where the mean is pointing
+print("mean spin (raw)   : mx, my, mz =", mx, my, mz)
+vec = np.array([mx, my, mz])
+if np.linalg.norm(vec) < 1e-12:
+    # If the vector is essentially zero, choose a visible fallback direction
+    vec_norm = np.array([0.0, 0.0, 1.0])
+    print("mean spin ~ 0, using fallback vec_norm =", vec_norm)
+else:
+    vec_norm = vec / np.linalg.norm(vec)
+    print("mean spin (normalized) vec_norm =", vec_norm)
+
+# Plot a large white dot on the sphere surface (always visible)
+ax.scatter([vec_norm[0]], [vec_norm[1]], [vec_norm[2]],
+           color='white', edgecolors='k', s=500, zorder=10000, depthshade=False) # Increased zorder
+
+# Draw a white arrow from origin to just inside the dot (so arrowhead doesn't overlap too much)
+ax.quiver(0, 0, 0, vec_norm[0], vec_norm[1], vec_norm[2],
+          color='white', linewidth=2.5, arrow_length_ratio=0.15, zorder=9999) # Increased zorder
+
+# (optional) rotate camera so the marker is likely visible initially; tweak azim if needed
+ax.view_init(elev=25, azim=400) # Adjusted azim to flip the view
+# ---------------------------------------------------------------------------
+
+# aesthetics
+ax.set_box_aspect([1,1,1])
+# Set axis labels
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_zlabel('Z')
+ax.axis('on') # Turn on axis visibility
+
+# Rotate view to see the other side
+ax.view_init(elev=25, azim=400) # Adjusted azim to flip the view
+
+
+# colorbar (use flattened W as set_array)
+mappable = cm.ScalarMappable(cmap=cmap, norm=norm)
+mappable.set_array(W_data_transposed.ravel())
+cbar = fig.colorbar(mappable, shrink=0.6, pad=0.05, ax=ax)
+
+cbar.set_label('Spin Wigner W(θ,φ)')
+
+ax.set_title(f"Spin Wigner on Bloch sphere — N={N}, σ={sigma}, record h₁={h1}, h₂={h2}", pad=20)
+plt.show()
+
+# safe_two_pixel_wigner_on_sphere.py
+# Robust plotting of the spin Wigner on a 3D Bloch sphere for a two-pixel,
+# measurement-conditioned state. Defensive about indexing to avoid "index out of bounds".
+
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import Normalize
+import qutip as qt
+from mpl_toolkits.mplot3d import Axes3D # Import Axes3D
+
+# ------------- User parameters (tune these) -------------
+N = 30               # total electrons (choose 10..40 for quick runs)
+j = N / 2.0
+p0, p1, p2 = 0.5, 0.25, 0.25
+sigma = 0.5          # measurement width (smaller --> stronger measurement)
+chi = 1.0 / (2.0 * sigma**2)
+
+# choose a measurement record to condition upon (integer counts)
+h1 = int(round(N * p1))
+h2 = int(round(N * p2))
+
+# sampling resolution for the Wigner grid (moderate defaults)
+theta_pts = 101
+phi_pts   = 201
+
+# ------------- Build fixed-N three-mode number basis -------------
+# basis: (n1, n2) where n0 = N - n1 - n2
+states = [(n1, n2) for n1 in range(N+1) for n2 in range(N+1-n1)]
+dim = len(states)
+n1_diag = np.array([s[0] for s in states], dtype=float)
+n2_diag = np.array([s[1] for s in states], dtype=float)
+n0_diag = N - n1_diag - n2_diag
+
+# ------------- Multinomial coherent input amplitudes |psi0> -------------
+log_fact = np.array([math.lgamma(k+1) for k in range(N+1)])  # log factorials
+amps = np.zeros(dim, dtype=complex)
+for i, (n1v, n2v) in enumerate(states):
+    n0v = int(N - n1v - n2v)
+    log_mult = log_fact[N] - (log_fact[n0v] + log_fact[n1v] + log_fact[n2v])
+    amps[i] = math.exp(0.5 * log_mult) * (p0 ** (n0v / 2.0)) * (p1 ** (n1v / 2.0)) * (p2 ** (n2v / 2.0))
+amps /= np.linalg.norm(amps)
+psi0 = qt.Qobj(amps)   # column vector in the number basis
+
+# ------------- Apply two-pixel Gaussian weak measurement (Kraus) -------------
+diagM = np.exp(-0.5 * chi * ((n1_diag - h1) ** 2 + (n2_diag - h2) ** 2))
+M = qt.Qobj(np.diag(diagM))
+psi_post = (M * psi0).unit()   # normalized post-measurement ket (number basis)
+
+# ------------- Map from number basis to collective spin |j,m> basis -------------
+# m = (n0 - n1 - n2)/2  with m in [-j, -j+1, ..., j]
+m_vals = (n0_diag - n1_diag - n2_diag) / 2.0
+dim_spin = int(2 * j + 1)
+psi_m = np.zeros(dim_spin, dtype=complex)
+
+# Use rounding and safe clamping to avoid out-of-bounds indexing
+for amp, m in zip(np.array(psi_post.full()).ravel(), m_vals):
+    idx = int(round(m + j))               # round to nearest integer index
+    # clamp index just in case of tiny floating error:
+    if idx < 0: idx = 0
+    if idx >= dim_spin: idx = dim_spin - 1
+    psi_m[idx] += amp
+
+# Normalize in the spin-m basis (should already be nearly normalized)
+norm_psi_m = np.linalg.norm(psi_m)
+if norm_psi_m < 1e-12:
+    raise RuntimeError("Spin mapping produced near-zero amplitudes. Check N and mapping.")
+psi_m /= norm_psi_m
+psi_spin = qt.Qobj(psi_m)   # state in |j,m> basis
+
+# ------------- Compute spin Wigner function -------------
+theta = np.linspace(0.0, np.pi, theta_pts)
+phi   = np.linspace(0.0, 2.0 * np.pi, phi_pts)
+
+# QuTiP returns W shape (len(phi), len(theta))
+W_data, _, _ = qt.spin_wigner(psi_spin, theta, phi)   # shape (phi_pts, theta_pts)
+
+# ------------- Convert to Cartesian coordinates for sphere plotting -------------
+# Use meshgrid with (theta index first) so shapes match W exactly
+THETA, PHI = np.meshgrid(theta, phi, indexing='ij')   # shape (theta_pts, phi_pts)
+X = np.sin(THETA) * np.cos(PHI)
+Y = np.sin(THETA) * np.sin(PHI)
+Z = np.cos(THETA)
+
+# Transpose W_data to match the (theta_pts, phi_pts) shape of the grid
+W_data_transposed = W_data.T
+
+# sanity checks (defensive)
+if W_data_transposed.shape != THETA.shape:
+    raise RuntimeError(f"Shape mismatch: W shape {W_data_transposed.shape} vs grid {THETA.shape}")
+
+# ------------- Color mapping and plotting -------------
+cmap = cm.seismic
+norm = Normalize(vmin=float(np.min(W_data_transposed)), vmax=float(np.max(W_data_transposed)))
+facecolors = cmap(norm(W_data_transposed))   # RGBA array same shape as W with one extra dimension
+
+# 3D surface plot
+fig = plt.figure(figsize=(9,8))
+ax = fig.add_subplot(111, projection='3d')
+
+# Plot surface (facecolors must match X,Y,Z shape)
+ax.plot_surface(X, Y, Z, rstride=1, cstride=1, facecolors=facecolors,
+                linewidth=0, antialiased=False, shade=False)
+
+#----------------- - Force visible mean-spin marker + arrow ------------------
+# compute mean-spin (true expectation, may be small)
+Jx, Jy, Jz = qt.jmat(j, 'x'), qt.jmat(j, 'y'), qt.jmat(j, 'z')
+mx = float(qt.expect(Jx, psi_spin)) / j
+my = float(qt.expect(Jy, psi_spin)) / j
+mz = float(qt.expect(Jz, psi_spin)) / j
+
+# print the raw values so you can check where the mean is pointing
+print("mean spin (raw)   : mx, my, mz =", mx, my, mz)
+vec = np.array([mx, my, mz])
+if np.linalg.norm(vec) < 1e-12:
+    # If the vector is essentially zero, choose a visible fallback direction
+    vec_norm = np.array([0.0, 0.0, 1.0])
+    print("mean spin ~ 0, using fallback vec_norm =", vec_norm)
+else:
+    vec_norm = vec / np.linalg.norm(vec)
+    print("mean spin (normalized) vec_norm =", vec_norm)
+
+# Plot a large white dot on the sphere surface (always visible)
+ax.scatter([vec_norm[0]], [vec_norm[1]], [vec_norm[2]],
+           color='white', edgecolors='k', s=500, zorder=10000, depthshade=False) # Increased zorder
+
+# Draw a white arrow from origin to just inside the dot (so arrowhead doesn't overlap too much)
+ax.quiver(0, 0, 0, vec_norm[0], vec_norm[1], vec_norm[2],
+          color='white', linewidth=2.5, arrow_length_ratio=0.15, zorder=9999) # Increased zorder
+
+# (optional) rotate camera so the marker is likely visible initially; tweak azim if needed
+ax.view_init(elev=25, azim=220)
+# ---------------------------------------------------------------------------
+
+# aesthetics
+ax.set_box_aspect([1,1,1])
+# Set axis labels
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_zlabel('Z')
+ax.axis('on') # Turn on axis visibility
+
+# Rotate view to see the other side
+ax.view_init(elev=25, azim=220)
+
+# colorbar (use flattened W as set_array)
+mappable = cm.ScalarMappable(cmap=cmap, norm=norm)
+mappable.set_array(W_data_transposed.ravel())
+cbar = fig.colorbar(mappable, shrink=0.6, pad=0.05, ax=ax)
+
+cbar.set_label('Spin Wigner W(θ,φ)')
+
+ax.set_title(f"Spin Wigner on Bloch sphere — N={N}, σ={sigma}, record h₁={h1}, h₂={h2}", pad=20)
+plt.show()
