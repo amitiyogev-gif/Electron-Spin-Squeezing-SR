@@ -1,0 +1,117 @@
+# two_pixel_axis_test_with_axes.py
+# Plot the Wigner function on a Bloch sphere for a 2-pixel
+# post-measurement state, at an "axis" point (all electrons in one arm).
+
+import numpy as np, math
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import Normalize
+import qutip as qt
+
+# ---------------- Parameters ----------------
+N = 21          # total electrons
+j = N / 2.0     # spin length
+p0, p1, p2 = 0.5, 0.25, 0.25
+sigma = 0.5
+chi = 1.0 / (2.0 * sigma**2)
+
+theta_pts = 101
+phi_pts   = 201
+
+# ---------------- Build 3-mode number basis ----------------
+states = [(n1, n2) for n1 in range(N+1) for n2 in range(N+1-n1)]
+dim = len(states)
+n1_diag = np.array([s[0] for s in states], float)
+n2_diag = np.array([s[1] for s in states], float)
+n0_diag = N - n1_diag - n2_diag
+
+log_fact = np.array([math.lgamma(k+1) for k in range(N+1)])
+amps = np.zeros(dim, dtype=complex)
+for i, (n1v, n2v) in enumerate(states):
+    n0v = int(N - n1v - n2v)
+    log_mult = log_fact[N] - (log_fact[n0v] + log_fact[n1v] + log_fact[n2v])
+    amps[i] = math.exp(0.5*log_mult) * (p0**(n0v/2.0))*(p1**(n1v/2.0))*(p2**(n2v/2.0))
+amps /= np.linalg.norm(amps)
+psi0 = qt.Qobj(amps, dims=[[dim],[1]])
+
+# ---------------- Conditioned state function ----------------
+def conditioned_spin_state(h1, h2):
+    diagM = np.exp(-0.5*chi*((n1_diag - h1)**2 + (n2_diag - h2)**2))
+    M = qt.Qobj(np.diag(diagM))
+    val = psi0.dag() * (M.dag()*M) * psi0
+    prob = np.real(val.full().item()) if isinstance(val, qt.Qobj) else np.real(val)
+    if prob < 1e-16:
+        return prob, None
+    psi_post = (M*psi0).unit()
+
+    # map to spin basis
+    m_vals = (n0_diag - n1_diag - n2_diag)/2.0
+    dim_spin = int(2*j+1)
+    psi_m = np.zeros(dim_spin, dtype=complex)
+    for amp, m in zip(np.array(psi_post.full()).ravel(), m_vals):
+        idx = int(round(m + j))
+        idx = max(0, min(dim_spin-1, idx))
+        psi_m[idx] += amp
+    if np.linalg.norm(psi_m) < 1e-12:
+        return prob, None
+    psi_m /= np.linalg.norm(psi_m)
+
+    return prob, qt.Qobj(psi_m, dims=[[dim_spin],[1]])
+
+# ---------------- Axis test: (N,0) ----------------
+axis_point = (5,5)
+prob_axis, psi_spin_axis = conditioned_spin_state(*axis_point)
+print("Axis test probability:", prob_axis)
+
+if psi_spin_axis is not None:
+    theta = np.linspace(0, np.pi, theta_pts)
+    phi   = np.linspace(0, 2*np.pi, phi_pts)
+    W, _, _ = qt.spin_wigner(psi_spin_axis, theta, phi)
+    W = W.T if W.shape == (len(phi), len(theta)) else W
+
+    TH, PH = np.meshgrid(theta, phi, indexing='ij')
+    X = np.sin(TH)*np.cos(PH)
+    Y = np.sin(TH)*np.sin(PH)
+    Z = np.cos(TH)
+
+    # symmetric color scale around zero
+    wmax = np.max(np.abs(W))
+    norm_map = Normalize(vmin=-wmax, vmax=wmax)
+    facecolors = cm.seismic(norm_map(W))
+
+    fig = plt.figure(figsize=(7,7))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.plot_surface(X, Y, Z, rstride=1, cstride=1, facecolors=facecolors,
+                    linewidth=0, antialiased=False, shade=False)
+
+    # Mean spin vector (white arrow + dot)
+    Jx, Jy, Jz = qt.jmat(j,'x'), qt.jmat(j,'y'), qt.jmat(j,'z')
+    mx = float(qt.expect(Jx, psi_spin_axis))/j
+    my = float(qt.expect(Jy, psi_spin_axis))/j
+    mz = float(qt.expect(Jz, psi_spin_axis))/j
+    vec = np.array([mx,my,mz])
+    if np.linalg.norm(vec) > 1e-9:
+        vec /= np.linalg.norm(vec)
+        ax.quiver(0,0,0, vec[0],vec[1],vec[2], color='white', linewidth=2, arrow_length_ratio=0.15)
+        ax.scatter([vec[0]],[vec[1]],[vec[2]], color='white', edgecolors='k', s=150)
+
+    # Axes arrows + labels
+    L = 1.4
+    ax.quiver(0,0,0, L,0,0, color='k')
+    ax.quiver(0,0,0, 0,L,0, color='k')
+    ax.quiver(0,0,0, 0,0,L, color='k')
+    ax.text3D(L*1.1,0,0,'x',fontsize=14)
+    ax.text3D(0,L*1.1,0,'y',fontsize=14)
+    ax.text3D(0,0,L*1.1,'z',fontsize=14)
+
+    ax.set_box_aspect([1,1,1])
+    ax.axis('off')
+    ax.view_init(elev=25, azim=220)
+
+    mappable = cm.ScalarMappable(cmap=cm.seismic, norm=norm_map)
+    mappable.set_array(W.ravel())
+    cbar = fig.colorbar(mappable, shrink=0.6, pad=0.05, ax=ax)
+    cbar.set_label('Spin Wigner W(θ,φ)')
+
+    ax.set_title(f"Wigner on Bloch sphere — axis point (h1={axis_point[0]}, h2={axis_point[1]})")
+    plt.show()
